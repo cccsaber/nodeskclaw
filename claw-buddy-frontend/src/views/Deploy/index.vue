@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useClusterStore } from '@/stores/cluster'
 import { useInstanceStore } from '@/stores/instance'
+import { useOrgStore } from '@/stores/org'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -11,18 +12,25 @@ import { Badge } from '@/components/ui/badge'
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from '@/components/ui/select'
+import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import {
+  Command, CommandEmpty, CommandGroup, CommandInput, CommandItem, CommandList,
+} from '@/components/ui/command'
 import AdvancedConfigPanel from '@/components/AdvancedConfigPanel.vue'
 import {
   Rocket, CheckCircle, XCircle, AlertTriangle, Loader2,
   ChevronLeft, ChevronRight, ChevronDown, ChevronUp, RefreshCw, CircleAlert,
+  ChevronsUpDown, Check, Building2,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { pinyin } from 'pinyin-pro'
 import api from '@/services/api'
 
 const router = useRouter()
 const authStore = useAuthStore()
 const clusterStore = useClusterStore()
 const instanceStore = useInstanceStore()
+const orgStore = useOrgStore()
 
 // ── Stepper ──
 const currentStep = ref(0)
@@ -34,8 +42,24 @@ const steps = [
 ]
 
 // ── Form state ──
+const slugManuallyEdited = ref(false)
+
+function toSlug(input: string): string {
+  const hasChinese = /[\u4e00-\u9fa5]/.test(input)
+  const raw = hasChinese
+    ? pinyin(input, { toneType: 'none', type: 'array' }).join('-')
+    : input
+  return raw
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-|-$/g, '')
+}
+
 const form = ref({
   name: '',
+  slug: '',
+  org_id: '',
   image_version: '',
   replicas: 1,
   cpu_request: '2000m',
@@ -47,6 +71,12 @@ const form = ref({
   quota_cpu: '4',
   quota_mem: '8Gi',
 })
+
+// ── 组织选择 ──
+const orgPopoverOpen = ref(false)
+const selectedOrg = computed(() =>
+  orgStore.orgs.find(o => o.id === form.value.org_id) ?? null
+)
 
 /** 根据用户邮箱前缀 + 已有实例数量生成默认实例名称（RFC 1123 格式） */
 function generateDefaultName() {
@@ -62,37 +92,64 @@ function generateDefaultName() {
   prefix = prefix.replace(/^-+|-+$/g, '').replace(/-{2,}/g, '-') || 'instance'
   const count = instanceStore.instances.length + 1
   form.value.name = `${prefix}-${count}`
+  form.value.slug = toSlug(form.value.name)
 }
 
-// ── 名称冲突检测（防抖）──
-const nameConflict = ref<{ conflict: boolean; reason: string }>({ conflict: false, reason: '' })
-const checkingName = ref(false)
-let nameCheckTimer: ReturnType<typeof setTimeout> | null = null
+// ── slug 冲突检测（防抖）──
+const slugConflict = ref<{ conflict: boolean; reason: string }>({ conflict: false, reason: '' })
+const checkingSlug = ref(false)
+let slugCheckTimer: ReturnType<typeof setTimeout> | null = null
+
+const slugValid = computed(() => /^[a-z][a-z0-9-]*[a-z0-9]$/.test(form.value.slug) && form.value.slug.length >= 2)
 
 watch(
   () => form.value.name,
-  (name) => {
-    // 清除上一次定时器
-    if (nameCheckTimer) clearTimeout(nameCheckTimer)
-    // 空名称直接重置
-    if (!name || !selectedCluster.value) {
-      nameConflict.value = { conflict: false, reason: '' }
-      return
+  (val) => {
+    if (!slugManuallyEdited.value) {
+      form.value.slug = toSlug(val)
     }
-    // 防抖 400ms
-    nameCheckTimer = setTimeout(async () => {
-      checkingName.value = true
+  },
+)
+
+watch(
+  () => form.value.slug,
+  (slug) => {
+    if (slugCheckTimer) clearTimeout(slugCheckTimer)
+    slugConflict.value = { conflict: false, reason: '' }
+    if (!slug || !slugValid.value || !form.value.org_id) return
+    slugCheckTimer = setTimeout(async () => {
+      checkingSlug.value = true
       try {
-        const res = await api.get('/instances/check-name', {
-          params: { name, cluster_id: selectedCluster.value!.id },
-        })
-        nameConflict.value = res.data.data
+        const res = await api.get('/instances/check-slug', { params: { slug, org_id: form.value.org_id } })
+        slugConflict.value = res.data.data
       } catch {
-        nameConflict.value = { conflict: false, reason: '' }
+        slugConflict.value = { conflict: false, reason: '' }
       } finally {
-        checkingName.value = false
+        checkingSlug.value = false
       }
     }, 400)
+  },
+)
+
+// 组织切换时重新检测 slug 冲突
+watch(
+  () => form.value.org_id,
+  () => {
+    if (form.value.slug && slugValid.value && form.value.org_id) {
+      slugConflict.value = { conflict: false, reason: '' }
+      if (slugCheckTimer) clearTimeout(slugCheckTimer)
+      slugCheckTimer = setTimeout(async () => {
+        checkingSlug.value = true
+        try {
+          const res = await api.get('/instances/check-slug', { params: { slug: form.value.slug, org_id: form.value.org_id } })
+          slugConflict.value = res.data.data
+        } catch {
+          slugConflict.value = { conflict: false, reason: '' }
+        } finally {
+          checkingSlug.value = false
+        }
+      }, 300)
+    }
   },
 )
 
@@ -250,6 +307,7 @@ onMounted(async () => {
   await Promise.all([
     clusterStore.fetchClusters(),
     instanceStore.fetchInstances(),
+    orgStore.fetchAllOrgs(),
     fetchImageTags(true),
     fetchBaseDomain(),
     fetchStorageClasses(),
@@ -281,6 +339,7 @@ function buildPayload() {
   return {
     ...form.value,
     cluster_id: selectedCluster.value?.id,
+    org_id: form.value.org_id || undefined,
     env_vars: Object.keys(envVars).length > 0 ? envVars : {},
     advanced_config: hasAdvanced
       ? { ...advancedConfig.value, init_containers: initContainers }
@@ -343,7 +402,9 @@ function prevStep() {
 
 // ── Step validation ──
 const canProceedStep0 = computed(() =>
-  !!form.value.name && !!form.value.image_version && !!selectedCluster.value && !nameConflict.value.conflict && !checkingName.value
+  !!form.value.org_id
+  && !!form.value.name && !!form.value.slug && slugValid.value && !slugConflict.value.conflict && !checkingSlug.value
+  && !!form.value.image_version && !!selectedCluster.value
 )
 const canProceedStep1 = computed(() =>
   !!form.value.quota_cpu && !!form.value.quota_mem
@@ -357,14 +418,16 @@ const yamlPreview = computed(() => {
   lines.push('apiVersion: apps/v1')
   lines.push('kind: Deployment')
   lines.push('metadata:')
-  lines.push(`  name: ${p.name || '<name>'}`)
-  lines.push(`  namespace: clawbuddy-${p.name || '<name>'}`)
+  const slug = (p as Record<string, unknown>).slug as string || '<slug>'
+  lines.push(`  name: ${slug}`)
+  const orgSlug = selectedOrg.value?.slug ?? '<org_slug>'
+  lines.push(`  namespace: clawbuddy-${orgSlug}-${slug}`)
   lines.push('spec:')
   lines.push(`  replicas: ${p.replicas}`)
   lines.push('  template:')
   lines.push('    spec:')
   lines.push('      containers:')
-  lines.push(`        - name: ${p.name || '<name>'}`)
+  lines.push(`        - name: ${slug}`)
   lines.push(`          image: <registry>:${p.image_version || '<tag>'}`)
   lines.push('          resources:')
   lines.push('            requests:')
@@ -415,19 +478,19 @@ const yamlPreview = computed(() => {
   lines.push('apiVersion: v1')
   lines.push('kind: Service')
   lines.push('metadata:')
-  lines.push(`  name: ${p.name || '<name>'}`)
+  lines.push(`  name: ${slug}`)
   lines.push('spec:')
   lines.push('  type: ClusterIP')
   lines.push('  ports:')
   lines.push('    - port: 18789')
   lines.push('      targetPort: 18789')
-  if (baseDomain.value && p.name) {
-    const host = `${p.name}.${baseDomain.value}`
+  if (baseDomain.value && slug !== '<slug>') {
+    const host = `${slug}.${baseDomain.value}`
     lines.push('---')
     lines.push('apiVersion: networking.k8s.io/v1')
     lines.push('kind: Ingress')
     lines.push('metadata:')
-    lines.push(`  name: ${p.name}`)
+    lines.push(`  name: ${slug}`)
     lines.push('  annotations:')
     lines.push('    nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"')
     lines.push('    nginx.ingress.kubernetes.io/proxy-send-timeout: "3600"')
@@ -443,7 +506,7 @@ const yamlPreview = computed(() => {
     lines.push('            pathType: Prefix')
     lines.push('            backend:')
     lines.push('              service:')
-    lines.push(`                name: ${p.name}`)
+    lines.push(`                name: ${slug}`)
     lines.push('                port:')
     lines.push('                  number: 18789')
   }
@@ -494,24 +557,83 @@ const yamlPreview = computed(() => {
     <Card v-show="currentStep === 0">
       <CardHeader><CardTitle>基本信息</CardTitle></CardHeader>
       <CardContent class="space-y-4">
+        <!-- 目标组织（必选） -->
+        <div>
+          <label class="text-sm font-medium mb-1.5 block">目标组织 *</label>
+          <Popover v-model:open="orgPopoverOpen">
+            <PopoverTrigger as-child>
+              <Button
+                variant="outline"
+                role="combobox"
+                :aria-expanded="orgPopoverOpen"
+                class="w-full justify-between font-normal"
+              >
+                <span v-if="selectedOrg" class="flex items-center gap-2 truncate">
+                  <Building2 class="w-4 h-4 shrink-0 text-muted-foreground" />
+                  {{ selectedOrg.name }}
+                  <span class="text-xs text-muted-foreground font-mono">({{ selectedOrg.slug }})</span>
+                </span>
+                <span v-else class="text-muted-foreground">选择组织...</span>
+                <ChevronsUpDown class="ml-2 h-4 w-4 shrink-0 opacity-50" />
+              </Button>
+            </PopoverTrigger>
+            <PopoverContent class="w-[--reka-popover-trigger-width] p-0" align="start">
+              <Command>
+                <CommandInput placeholder="搜索组织名称或标识..." />
+                <CommandEmpty>未找到匹配的组织</CommandEmpty>
+                <CommandList>
+                  <CommandGroup>
+                    <CommandItem
+                      v-for="org in orgStore.orgs"
+                      :key="org.id"
+                      :value="`${org.name} ${org.slug}`"
+                      @select="form.org_id = org.id; orgPopoverOpen = false"
+                    >
+                      <Check class="mr-2 h-4 w-4" :class="form.org_id === org.id ? 'opacity-100' : 'opacity-0'" />
+                      <span class="truncate">{{ org.name }}</span>
+                      <span class="ml-auto text-xs text-muted-foreground font-mono">{{ org.slug }}</span>
+                    </CommandItem>
+                  </CommandGroup>
+                </CommandList>
+              </Command>
+            </PopoverContent>
+          </Popover>
+          <p v-if="!form.org_id" class="text-xs text-muted-foreground mt-1">
+            选择此实例所属的组织，slug 冲突检测将在该组织范围内进行
+          </p>
+        </div>
+
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="text-sm font-medium mb-1.5 block">实例名称 *</label>
+            <Input v-model="form.name" placeholder="如: 生产主力" />
+          </div>
+          <div>
+            <div class="flex items-center gap-1.5 mb-1.5">
+              <label class="text-sm font-medium">实例标识 (slug) *</label>
+              <span v-if="form.slug && !slugManuallyEdited" class="text-[10px] text-muted-foreground bg-muted px-1.5 py-0.5 rounded">自动生成</span>
+            </div>
             <div class="relative">
               <Input
-                v-model="form.name"
+                v-model="form.slug"
                 placeholder="如: prod-main"
-                :class="nameConflict.conflict ? 'border-red-400 focus-visible:ring-red-400/30' : ''"
+                class="font-mono"
+                :class="slugConflict.conflict ? 'border-red-400 focus-visible:ring-red-400/30' : ''"
+                @input="slugManuallyEdited = true"
               />
               <Loader2
-                v-if="checkingName"
+                v-if="checkingSlug"
                 class="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground animate-spin"
               />
             </div>
-            <p v-if="nameConflict.conflict" class="flex items-center gap-1 text-xs text-red-400 mt-1">
+            <p v-if="slugConflict.conflict" class="flex items-center gap-1 text-xs text-red-400 mt-1">
               <CircleAlert class="w-3.5 h-3.5 shrink-0" />
-              {{ nameConflict.reason }}
+              {{ slugConflict.reason }}
             </p>
+            <p v-else-if="form.slug && !slugValid" class="text-xs text-red-400 mt-1">
+              须以小写字母开头，仅含小写字母、数字和连字符，至少 2 个字符
+            </p>
+            <p v-else class="text-xs text-muted-foreground mt-1">根据名称自动生成，也可手动修改</p>
           </div>
           <div>
             <div class="flex items-center gap-1.5 mb-1.5">
@@ -659,8 +781,26 @@ const yamlPreview = computed(() => {
             <label class="text-sm font-medium">运行时环境变量</label>
             <Button variant="outline" size="sm" @click="addEnv">+ 添加</Button>
           </div>
+
+          <div class="flex flex-wrap gap-1.5 mb-3">
+            <Button
+              v-for="preset in [
+                { label: 'OpenAI', pairs: [{ key: 'OPENAI_API_KEY', value: '' }, { key: 'OPENAI_BASE_URL', value: '' }] },
+                { label: 'Anthropic', pairs: [{ key: 'ANTHROPIC_API_KEY', value: '' }, { key: 'ANTHROPIC_BASE_URL', value: '' }] },
+                { label: 'Gemini', pairs: [{ key: 'GEMINI_API_KEY', value: '' }, { key: 'GEMINI_BASE_URL', value: '' }] },
+              ]"
+              :key="preset.label"
+              variant="secondary"
+              size="sm"
+              class="h-6 text-xs px-2"
+              @click="preset.pairs.forEach(p => { if (!envPairs.some(e => e.key === p.key)) envPairs.push({ ...p }) })"
+            >
+              + {{ preset.label }}
+            </Button>
+          </div>
+
           <div v-if="envPairs.length === 0" class="text-xs text-muted-foreground">
-            暂无环境变量，可直接跳过此步
+            暂无环境变量，可直接跳过此步。点击上方按钮快速添加常用 LLM Provider 配置
           </div>
           <div v-for="(pair, idx) in envPairs" :key="idx" class="grid grid-cols-[1fr_1fr_auto] gap-2 mb-2">
             <Input v-model="pair.key" placeholder="KEY" class="text-xs" />
@@ -680,6 +820,8 @@ const yamlPreview = computed(() => {
         <CardHeader><CardTitle>部署概览</CardTitle></CardHeader>
         <CardContent>
           <div class="grid grid-cols-2 gap-x-6 gap-y-2 text-sm">
+            <div class="text-muted-foreground">目标组织</div>
+            <div class="font-medium">{{ selectedOrg?.name ?? '-' }} <span class="text-xs text-muted-foreground font-mono">({{ selectedOrg?.slug ?? '-' }})</span></div>
             <div class="text-muted-foreground">实例名称</div>
             <div class="font-medium">{{ form.name }}</div>
             <div class="text-muted-foreground">镜像版本</div>

@@ -39,13 +39,17 @@ async def deploy(
     current_user: User = Depends(get_current_user),
 ):
     """执行部署：同步创建记录后立即返回，K8s 管道在后台异步执行。"""
+    effective_org_id = body.org_id or current_user.current_org_id
+    if not effective_org_id:
+        raise HTTPException(status_code=400, detail="缺少目标组织，无法部署")
     try:
         deploy_id, ctx = await deploy_service.deploy_instance(
-            body, current_user, db, org_id=current_user.current_org_id
+            body, current_user, db, org_id=effective_org_id
         )
     except IntegrityError:
         await db.rollback()
-        raise HTTPException(status_code=409, detail=f"实例名称 '{body.name}' 已存在，请更换名称")
+        slug_display = body.slug or body.name
+        raise HTTPException(status_code=409, detail=f"实例标识 '{slug_display}' 已存在，请更换标识")
 
     # 后台异步执行 K8s 部署管道（使用独立 DB session）
     task = asyncio.create_task(
@@ -55,7 +59,7 @@ async def deploy(
     deploy_service.register_deploy_task(deploy_id, task)
     logger.info("部署任务已提交到后台: deploy_id=%s, instance=%s", deploy_id, ctx.name)
 
-    return ApiResponse(data={"deploy_id": deploy_id})
+    return ApiResponse(data={"deploy_id": deploy_id, "instance_id": ctx.instance_id})
 
 
 @router.post("/{deploy_id}/cancel", response_model=ApiResponse[dict])
