@@ -4,8 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { getCurrentLocale, setCurrentLocale } from '@/i18n'
-import { PawPrint, Settings, LogOut, Users, BarChart3, Boxes, Server, FlaskConical, User } from 'lucide-vue-next'
-import LocaleSelect from '@/components/shared/LocaleSelect.vue'
+import { PawPrint, Settings, LogOut, Users, BarChart3, Boxes, Server, FlaskConical, User, Languages, ChevronDown } from 'lucide-vue-next'
 import ToastContainer from '@/components/shared/ToastContainer.vue'
 
 const route = useRoute()
@@ -47,7 +46,8 @@ function navigateFromMenu(path: string) {
   router.push(path)
 }
 
-function onLocaleChange(value: string) {
+function onLocaleChange(event: Event) {
+  const value = (event.target as HTMLSelectElement).value
   locale.value = setCurrentLocale(value)
 }
 </script>
@@ -125,7 +125,18 @@ function onLocaleChange(value: string) {
           </nav>
         </div>
         <div class="flex items-center gap-3">
-          <LocaleSelect :model-value="locale" @update:model-value="onLocaleChange" />
+          <div class="relative">
+            <Languages class="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+            <select
+              class="h-8 w-[116px] appearance-none rounded-md border border-border bg-card pl-7 pr-6 text-xs font-medium text-foreground"
+              :value="locale"
+              @change="onLocaleChange"
+            >
+              <option value="zh-CN">🇨🇳 ZH-CN</option>
+              <option value="en-US">🇺🇸 EN-US</option>
+            </select>
+            <ChevronDown class="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+          </div>
           <div class="relative" ref="userMenuRef">
           <button
             class="w-8 h-8 rounded-full overflow-hidden flex items-center justify-center bg-primary/10 hover:ring-2 hover:ring-primary/30 transition-all"

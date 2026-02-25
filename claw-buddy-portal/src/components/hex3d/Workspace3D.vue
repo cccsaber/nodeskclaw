@@ -7,9 +7,7 @@ import { useHexRaycaster } from '@/composables/useHexRaycaster'
 import { axialToWorld, HEX_SIZE } from '@/composables/useHexLayout'
 import AgentHex3D from './AgentHex3D.vue'
 import Blackboard3D from './Blackboard3D.vue'
-import type { AgentBrief, TopologyNode, TopologyEdge } from '@/stores/workspace'
-
-type HexType = 'empty' | 'agent' | 'blackboard' | 'human' | 'corridor'
+import type { AgentBrief } from '@/stores/workspace'
 
 const props = defineProps<{
   agents: AgentBrief[]
@@ -17,12 +15,10 @@ const props = defineProps<{
   manualNotes: string
   selectedAgentId: string | null
   selectedHex: { q: number, r: number } | null
-  topologyNodes?: TopologyNode[]
-  topologyEdges?: TopologyEdge[]
 }>()
 
 const emit = defineEmits<{
-  (e: 'hex-click', payload: { q: number, r: number, type: HexType, agentId?: string, entityId?: string }): void
+  (e: 'hex-click', payload: { q: number, r: number, type: 'empty' | 'agent' | 'blackboard', agentId?: string }): void
   (e: 'agent-dblclick', id: string): void
   (e: 'agent-hover', id: string | null): void
 }>()
@@ -49,12 +45,6 @@ watch(selectedId, (id) => {
   } else if (id.startsWith('empty:')) {
     const [, qs, rs] = id.split(':')
     emit('hex-click', { q: Number(qs), r: Number(rs), type: 'empty' })
-  } else if (id.startsWith('corridor:')) {
-    const node = props.topologyNodes?.find(n => n.entity_id === id.slice(9))
-    if (node) emit('hex-click', { q: node.hex_q, r: node.hex_r, type: 'corridor', entityId: node.entity_id ?? undefined })
-  } else if (id.startsWith('human:')) {
-    const node = props.topologyNodes?.find(n => n.node_type === 'human' && n.entity_id === id.slice(6))
-    if (node) emit('hex-click', { q: node.hex_q, r: node.hex_r, type: 'human', entityId: node.entity_id ?? undefined })
   } else {
     const agent = props.agents.find((a) => a.instance_id === id)
     if (agent) emit('hex-click', { q: agent.hex_q, r: agent.hex_r, type: 'agent', agentId: id })
@@ -190,91 +180,6 @@ function createBlackboardMesh(): THREE.Group {
   return group
 }
 
-const CORRIDOR_HEX_GEO = new THREE.CylinderGeometry(HEX_SIZE * 0.85, HEX_SIZE * 0.85, 0.2, 6)
-const HUMAN_HEX_GEO = new THREE.CylinderGeometry(HEX_SIZE * 0.7, HEX_SIZE * 0.7, 0.5, 6)
-
-function createCorridorHexMesh(node: TopologyNode): THREE.Group {
-  const group = new THREE.Group()
-  const { x, y } = axialToWorld(node.hex_q, node.hex_r)
-  group.position.set(x, 0.1, y)
-  const hexId = `corridor:${node.entity_id}`
-  group.userData = { hexId, isHex: true }
-
-  const mat = new THREE.MeshStandardMaterial({
-    color: 0x38bdf8,
-    emissive: new THREE.Color(0x38bdf8),
-    emissiveIntensity: 0.2,
-    metalness: 0.1,
-    roughness: 0.4,
-    transparent: true,
-    opacity: 0.45,
-  })
-  const mesh = new THREE.Mesh(CORRIDOR_HEX_GEO, mat)
-  mesh.userData = { hexId, isHex: true }
-  group.add(mesh)
-
-  const edgeGeo = new THREE.EdgesGeometry(CORRIDOR_HEX_GEO)
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0x38bdf8, transparent: true, opacity: 0.6 })
-  group.add(new THREE.LineSegments(edgeGeo, edgeMat))
-
-  return group
-}
-
-function createHumanHexMesh(node: TopologyNode): THREE.Group {
-  const group = new THREE.Group()
-  const { x, y } = axialToWorld(node.hex_q, node.hex_r)
-  group.position.set(x, 0.25, y)
-  const hexId = `human:${node.entity_id}`
-  group.userData = { hexId, isHex: true }
-
-  const color = 0xf59e0b
-  const mat = new THREE.MeshStandardMaterial({
-    color,
-    emissive: new THREE.Color(color),
-    emissiveIntensity: 0.3,
-    metalness: 0.2,
-    roughness: 0.5,
-    transparent: true,
-    opacity: 0.9,
-  })
-  const mesh = new THREE.Mesh(HUMAN_HEX_GEO, mat)
-  mesh.userData = { hexId, isHex: true }
-  group.add(mesh)
-
-  const edgeGeo = new THREE.EdgesGeometry(HUMAN_HEX_GEO)
-  const edgeMat = new THREE.LineBasicMaterial({ color: 0xfbbf24, transparent: true, opacity: 0.7 })
-  group.add(new THREE.LineSegments(edgeGeo, edgeMat))
-
-  return group
-}
-
-const connectionMeshes: THREE.Line[] = []
-
-function createConnectionLines(edges: TopologyEdge[]) {
-  for (const line of connectionMeshes) {
-    scene.remove(line)
-    line.geometry.dispose()
-    ;(line.material as THREE.Material).dispose()
-  }
-  connectionMeshes.length = 0
-
-  for (const edge of edges) {
-    const a = axialToWorld(edge.a_q, edge.a_r)
-    const b = axialToWorld(edge.b_q, edge.b_r)
-    const points = [new THREE.Vector3(a.x, 0.15, a.y), new THREE.Vector3(b.x, 0.15, b.y)]
-    const geo = new THREE.BufferGeometry().setFromPoints(points)
-    const mat = new THREE.LineBasicMaterial({
-      color: edge.direction === 'both' ? 0x38bdf8 : 0xfbbf24,
-      transparent: true,
-      opacity: 0.6,
-      linewidth: 2,
-    })
-    const line = new THREE.Line(geo, mat)
-    scene.add(line)
-    connectionMeshes.push(line)
-  }
-}
-
 const GRID_RANGE = 8
 const EMPTY_HEX_GEO = new THREE.CylinderGeometry(HEX_SIZE * 0.9, HEX_SIZE * 0.9, 0.05, 6)
 
@@ -297,47 +202,29 @@ function createEmptyHexMesh(q: number, r: number): THREE.Group {
 }
 
 function syncScene() {
-  for (const [, group] of hexMeshes) {
+  // Clear existing hex meshes
+  for (const [id, group] of hexMeshes) {
     scene.remove(group)
   }
   hexMeshes.clear()
 
+  // Add agent hexes
   for (const agent of props.agents) {
     const group = createHexMesh(agent)
     scene.add(group)
     hexMeshes.set(agent.instance_id, group)
   }
 
+  // Add blackboard at center
   const bbGroup = createBlackboardMesh()
   scene.add(bbGroup)
   hexMeshes.set('__blackboard__', bbGroup)
 
-  const corridorNodes = (props.topologyNodes || []).filter(n => n.node_type === 'corridor')
-  for (const node of corridorNodes) {
-    const group = createCorridorHexMesh(node)
-    scene.add(group)
-    hexMeshes.set(`corridor:${node.entity_id}`, group)
-  }
-
-  const humanNodes = (props.topologyNodes || []).filter(n => n.node_type === 'human')
-  for (const node of humanNodes) {
-    const group = createHumanHexMesh(node)
-    scene.add(group)
-    hexMeshes.set(`human:${node.entity_id}`, group)
-  }
-
-  createConnectionLines(props.topologyEdges || [])
-
+  // Add clickable empty hex meshes for all unoccupied grid positions
   const occupied = new Set<string>()
-  occupied.add('0:0')
+  occupied.add('0:0') // blackboard
   for (const agent of props.agents) {
     occupied.add(`${agent.hex_q}:${agent.hex_r}`)
-  }
-  for (const node of corridorNodes) {
-    occupied.add(`${node.hex_q}:${node.hex_r}`)
-  }
-  for (const node of humanNodes) {
-    occupied.add(`${node.hex_q}:${node.hex_r}`)
   }
   for (let q = -GRID_RANGE; q <= GRID_RANGE; q++) {
     for (let r = -GRID_RANGE; r <= GRID_RANGE; r++) {
@@ -350,7 +237,7 @@ function syncScene() {
   }
 }
 
-watch([() => props.agents, () => props.topologyNodes, () => props.topologyEdges], syncScene, { deep: true, immediate: true })
+watch(() => props.agents, syncScene, { deep: true, immediate: true })
 
 // Hover + selection animation
 const clock = new THREE.Clock()
@@ -403,12 +290,6 @@ addToLoop(() => {
 onUnmounted(() => {
   HEX_GEO.dispose()
   EMPTY_HEX_GEO.dispose()
-  CORRIDOR_HEX_GEO.dispose()
-  HUMAN_HEX_GEO.dispose()
-  for (const line of connectionMeshes) {
-    line.geometry.dispose()
-    ;(line.material as THREE.Material).dispose()
-  }
 })
 
 defineExpose({

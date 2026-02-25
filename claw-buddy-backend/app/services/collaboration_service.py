@@ -70,18 +70,6 @@ async def handle_collaboration_message(
             target_name = target[6:]
             target_inst = await _find_agent_by_name(db, workspace_id, target_name)
             if target_inst:
-                from app.services import corridor_router
-                has_topo = await corridor_router.has_any_connections(workspace_id, db)
-                if has_topo and source_inst.hex_position_q is not None:
-                    can = await corridor_router.can_reach(
-                        workspace_id,
-                        source_inst.hex_position_q, source_inst.hex_position_r,
-                        target_inst.hex_position_q or 0, target_inst.hex_position_r or 0,
-                        db,
-                    )
-                    if not can:
-                        logger.info("Corridor topology blocks %s -> %s", source_name, target_name)
-                        return
                 asyncio.create_task(
                     _invoke_target_agent(
                         workspace_id=workspace_id,
@@ -92,40 +80,18 @@ async def handle_collaboration_message(
                     )
                 )
         elif target == "broadcast":
-            from app.services import corridor_router
-            has_topo = await corridor_router.has_any_connections(workspace_id, db)
-            if has_topo and source_inst.hex_position_q is not None:
-                endpoints = await corridor_router.get_reachable_endpoints(
-                    workspace_id,
-                    source_inst.hex_position_q, source_inst.hex_position_r,
-                    db,
-                )
-                reachable_ids = {ep.entity_id for ep in endpoints if ep.endpoint_type == "agent"}
-                agents = await _get_workspace_agents(db, workspace_id)
-                for agent in agents:
-                    if agent.id != source_instance_id and agent.id in reachable_ids:
-                        asyncio.create_task(
-                            _invoke_target_agent(
-                                workspace_id=workspace_id,
-                                target_instance=agent,
-                                source_name=source_name,
-                                message=text,
-                                depth=depth + 1,
-                            )
+            agents = await _get_workspace_agents(db, workspace_id)
+            for agent in agents:
+                if agent.id != source_instance_id:
+                    asyncio.create_task(
+                        _invoke_target_agent(
+                            workspace_id=workspace_id,
+                            target_instance=agent,
+                            source_name=source_name,
+                            message=text,
+                            depth=depth + 1,
                         )
-            else:
-                agents = await _get_workspace_agents(db, workspace_id)
-                for agent in agents:
-                    if agent.id != source_instance_id:
-                        asyncio.create_task(
-                            _invoke_target_agent(
-                                workspace_id=workspace_id,
-                                target_instance=agent,
-                                source_name=source_name,
-                                message=text,
-                                depth=depth + 1,
-                            )
-                        )
+                    )
 
 
 # ── DB helpers ────────────────────────────────────────
