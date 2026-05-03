@@ -56,3 +56,19 @@ def test_docker_rewrite_urls_uses_external_proxy_url(monkeypatch):
     rewritten = _docker_rewrite_urls(providers)
 
     assert rewritten["codex"]["baseUrl"] == "http://host.docker.internal:18080/codex/v1"
+
+
+def test_docker_rewrite_urls_rewrites_compose_proxy_service(monkeypatch):
+    monkeypatch.setattr(settings, "LLM_PROXY_INTERNAL_URL", "http://llm-proxy:8080")
+    monkeypatch.setattr(settings, "LLM_PROXY_URL", "http://llm-proxy:8080")
+
+    providers = {
+        "glm": {
+            "baseUrl": "http://llm-proxy:8080/glm/v1",
+            "apiKey": "proxy-token",
+        }
+    }
+
+    rewritten = _docker_rewrite_urls(providers)
+
+    assert rewritten["glm"]["baseUrl"] == "http://host.docker.internal:4511/glm/v1"

@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
-from urllib.parse import urlparse as _urlparse
+from urllib.parse import urlparse as _urlparse, urlunparse as _urlunparse
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -135,13 +135,15 @@ def _docker_rewrite_urls(providers: dict) -> dict:
     """Docker 实例使用宿主机可达地址，避免依赖主 compose 网络内的服务名。"""
     proxy_internal_url = (settings.LLM_PROXY_INTERNAL_URL or "").rstrip("/")
     proxy_external_url = _docker_rewrite_url((settings.LLM_PROXY_URL or "").rstrip("/"))
+    if proxy_external_url:
+        proxy_external_url = _docker_rewrite_compose_proxy_url(proxy_external_url)
     for _provider_id, entry in providers.items():
         base_url = entry.get("baseUrl", "")
         if base_url:
             if proxy_internal_url and proxy_external_url and base_url.startswith(proxy_internal_url):
                 entry["baseUrl"] = f"{proxy_external_url}{base_url[len(proxy_internal_url):]}"
             else:
-                entry["baseUrl"] = _docker_rewrite_url(base_url)
+                entry["baseUrl"] = _docker_rewrite_compose_proxy_url(_docker_rewrite_url(base_url))
     return providers
 
 
@@ -728,6 +730,24 @@ async def _deploy_plugin_files(fs: RemoteFS, plugin_source: Path) -> None:
     await _deploy_plugin_files_generic(
         fs, plugin_source, CHANNEL_PLUGIN_REGISTRY["nodeskclaw"],
     )
+
+
+_COMPOSE_ONLY_PROXY_HOSTS = {"llm-proxy", "nodeskclaw-llm-proxy-1"}
+
+
+def _docker_rewrite_compose_proxy_url(url: str) -> str:
+    parsed = _urlparse(url)
+    if parsed.hostname not in _COMPOSE_ONLY_PROXY_HOSTS:
+        return url
+
+    netloc = "host.docker.internal"
+    if parsed.username:
+        netloc = f"{parsed.username}@{netloc}"
+    if parsed.port and parsed.port != 8080:
+        netloc = f"{netloc}:{parsed.port}"
+    else:
+        netloc = f"{netloc}:4511"
+    return _urlunparse(parsed._replace(netloc=netloc))
 
 
 def _docker_rewrite_url(url: str) -> str:
