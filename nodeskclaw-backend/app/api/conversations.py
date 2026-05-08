@@ -84,11 +84,16 @@ async def get_conversation_messages(
             not_deleted(Conversation),
         ).limit(1)
     )
-    if not conv_q.scalar_one_or_none():
+    conv = conv_q.scalar_one_or_none()
+    if not conv:
         raise NotFoundError("群聊不存在", "errors.conversation.not_found")
 
     messages = await wm_msg_service.get_recent_messages(
-        db, workspace_id, limit=limit, conversation_id=conv_id,
+        db,
+        workspace_id,
+        limit=limit,
+        conversation_id=conv_id,
+        include_unscoped=conv.is_blackboard_group,
     )
     return _ok([
         {

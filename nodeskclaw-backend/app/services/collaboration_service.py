@@ -443,6 +443,8 @@ async def _invoke_target_agent(
     source_instance_id: str,
     message: str,
     depth: int,
+    conversation_id: str | None = None,
+    persist_message_type: str = "collaboration",
 ) -> bool:
     """Invoke a target agent with a collaboration message via tunnel. Returns True on success."""
     from app.api.workspaces import broadcast_event
@@ -451,6 +453,11 @@ async def _invoke_target_agent(
 
     agent_name = target_instance.agent_display_name or target_instance.name
     instance_id = target_instance.id
+
+    def _event_payload(**payload: object) -> dict:
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        return payload
 
     if instance_id not in tunnel_adapter.connected_instances:
         logger.warning("Target agent %s not connected via tunnel", agent_name)
@@ -486,10 +493,10 @@ async def _invoke_target_agent(
         {"role": "user", "content": f"[{source_name} -> you]: {message}"},
     ]
 
-    broadcast_event(workspace_id, "agent:typing", {
-        "instance_id": instance_id,
-        "agent_name": agent_name,
-    })
+    broadcast_event(workspace_id, "agent:typing", _event_payload(
+        instance_id=instance_id,
+        agent_name=agent_name,
+    ))
 
     full_response = ""
     buffer = ""
@@ -516,7 +523,7 @@ async def _invoke_target_agent(
                 raw_body = chunk_msg.payload.get("error_raw")
                 if raw_body:
                     evt["error_raw"] = str(raw_body)[:2048]
-                broadcast_event(workspace_id, "agent:error", evt)
+                broadcast_event(workspace_id, "agent:error", _event_payload(**evt))
                 return False
             if chunk_msg.type == TunnelMessageType.CHAT_RESPONSE_DONE:
                 break
@@ -530,52 +537,52 @@ async def _invoke_target_agent(
                 buffer += content
                 if len(buffer) > 20:
                     if msg_service.is_no_reply(buffer.strip()):
-                        broadcast_event(workspace_id, "agent:done", {
-                            "instance_id": instance_id,
-                            "agent_name": agent_name,
-                        })
+                        broadcast_event(workspace_id, "agent:done", _event_payload(
+                            instance_id=instance_id,
+                            agent_name=agent_name,
+                        ))
                         return True
-                    broadcast_event(workspace_id, "agent:chunk", {
-                        "instance_id": instance_id,
-                        "agent_name": agent_name,
-                        "content": buffer,
-                    })
+                    broadcast_event(workspace_id, "agent:chunk", _event_payload(
+                        instance_id=instance_id,
+                        agent_name=agent_name,
+                        content=buffer,
+                    ))
                     flushed = True
             else:
-                broadcast_event(workspace_id, "agent:chunk", {
-                    "instance_id": instance_id,
-                    "agent_name": agent_name,
-                    "content": content,
-                })
+                broadcast_event(workspace_id, "agent:chunk", _event_payload(
+                    instance_id=instance_id,
+                    agent_name=agent_name,
+                    content=content,
+                ))
     except Exception as e:
         logger.error("Target agent %s streaming failed: %s", agent_name, e)
-        broadcast_event(workspace_id, "agent:error", {
-            "instance_id": instance_id,
-            "agent_name": agent_name,
-            "error": "stream_error",
-            "error_detail": str(e)[:256],
-        })
+        broadcast_event(workspace_id, "agent:error", _event_payload(
+            instance_id=instance_id,
+            agent_name=agent_name,
+            error="stream_error",
+            error_detail=str(e)[:256],
+        ))
         return False
 
     if not flushed and buffer:
         if msg_service.is_no_reply(buffer.strip()):
-            broadcast_event(workspace_id, "agent:done", {
-                "instance_id": instance_id,
-                "agent_name": agent_name,
-            })
+            broadcast_event(workspace_id, "agent:done", _event_payload(
+                instance_id=instance_id,
+                agent_name=agent_name,
+            ))
             return True
-        broadcast_event(workspace_id, "agent:chunk", {
-            "instance_id": instance_id,
-            "agent_name": agent_name,
-            "content": buffer,
-        })
+        broadcast_event(workspace_id, "agent:chunk", _event_payload(
+            instance_id=instance_id,
+            agent_name=agent_name,
+            content=buffer,
+        ))
 
     if full_response and not msg_service.is_no_reply(full_response.strip()):
-        broadcast_event(workspace_id, "agent:done", {
-            "instance_id": instance_id,
-            "agent_name": agent_name,
-            "full_content": full_response,
-        })
+        broadcast_event(workspace_id, "agent:done", _event_payload(
+            instance_id=instance_id,
+            agent_name=agent_name,
+            full_content=full_response,
+        ))
 
         async with async_session_factory() as save_db:
             await msg_service.record_message(
@@ -585,21 +592,22 @@ async def _invoke_target_agent(
                 sender_id=instance_id,
                 sender_name=agent_name,
                 content=full_response,
-                message_type="collaboration",
+                message_type=persist_message_type,
                 target_instance_id=source_instance_id,
                 depth=depth,
+                conversation_id=conversation_id,
             )
     elif not full_response:
-        broadcast_event(workspace_id, "agent:error", {
-            "instance_id": instance_id,
-            "agent_name": agent_name,
-            "error": "empty_response",
-        })
+        broadcast_event(workspace_id, "agent:error", _event_payload(
+            instance_id=instance_id,
+            agent_name=agent_name,
+            error="empty_response",
+        ))
     else:
-        broadcast_event(workspace_id, "agent:done", {
-            "instance_id": instance_id,
-            "agent_name": agent_name,
-        })
+        broadcast_event(workspace_id, "agent:done", _event_payload(
+            instance_id=instance_id,
+            agent_name=agent_name,
+        ))
 
     return True
 

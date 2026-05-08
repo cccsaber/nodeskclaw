@@ -20,6 +20,7 @@ import { AgentMention } from './extensions/agentMention'
 import { SlashCommand } from './extensions/slashCommand'
 import { computeMentionCandidates } from '@/utils/topologyBfs'
 import { formatTime as formatLocaleTime } from '@/utils/localeFormat'
+import { filterMessagesForConversation } from '@/utils/workspaceConversations'
 
 const props = withDefaults(defineProps<{
   workspaceId: string
@@ -38,10 +39,7 @@ const toast = useToast()
 const messagesEl = ref<HTMLElement | null>(null)
 
 const messages = computed(() => {
-  if (props.conversationId) {
-    return store.chatMessages.filter(m => m.conversation_id === props.conversationId || !m.conversation_id)
-  }
-  return store.chatMessages
+  return filterMessagesForConversation(store.chatMessages, props.conversationId, store.conversations)
 })
 const chatSearch = ref('')
 const searchFrom = ref('')
@@ -53,7 +51,10 @@ let searchRequestId = 0
 let searchTimer: ReturnType<typeof setTimeout> | null = null
 const normalizedSearch = computed(() => chatSearch.value.trim().toLowerCase())
 const searchActive = computed(() => Boolean(normalizedSearch.value || searchFrom.value || searchTo.value))
-const displayedMessages = computed(() => searchActive.value ? searchedMessages.value : messages.value)
+const displayedMessages = computed(() => {
+  if (!searchActive.value) return messages.value
+  return filterMessagesForConversation(searchedMessages.value, props.conversationId, store.conversations)
+})
 const searchResultCount = computed(() => displayedMessages.value.length)
 const sending = computed(() => store.chatLoading)
 const typingAgents = computed(() => store.typingAgents)
@@ -194,20 +195,31 @@ interface SuggestionState {
 const mentionState = ref<SuggestionState | null>(null)
 const commandState = ref<SuggestionState | null>(null)
 const pendingCommand = ref<{ id: string; label: string } | null>(null)
+const mentionSuggestionListRef = ref<HTMLElement | null>(null)
+const commandSuggestionListRef = ref<HTMLElement | null>(null)
 
-function createSuggestionRenderer(stateRef: Ref<SuggestionState | null>) {
+function scrollSuggestionIntoView(containerRef: Ref<HTMLElement | null>, idx: number) {
+  nextTick(() => {
+    const item = containerRef.value?.querySelector<HTMLElement>(`[data-suggestion-index="${idx}"]`)
+    item?.scrollIntoView({ block: 'nearest' })
+  })
+}
+
+function createSuggestionRenderer(stateRef: Ref<SuggestionState | null>, containerRef: Ref<HTMLElement | null>) {
   return () => {
     let idx = 0
     return {
       onStart(p: any) {
         idx = 0
         stateRef.value = { items: p.items, selectedIndex: 0, command: p.command }
+        scrollSuggestionIntoView(containerRef, idx)
       },
       onUpdate(p: any) {
         idx = 0
         stateRef.value = p.items.length
           ? { items: p.items, selectedIndex: 0, command: p.command }
           : null
+        if (stateRef.value) scrollSuggestionIntoView(containerRef, idx)
       },
       onKeyDown({ event }: { event: KeyboardEvent }): boolean {
         if (!stateRef.value || !stateRef.value.items.length) return false
@@ -215,11 +227,13 @@ function createSuggestionRenderer(stateRef: Ref<SuggestionState | null>) {
         if (event.key === 'ArrowUp') {
           idx = (idx - 1 + len) % len
           stateRef.value = { ...stateRef.value, selectedIndex: idx }
+          scrollSuggestionIntoView(containerRef, idx)
           return true
         }
         if (event.key === 'ArrowDown') {
           idx = (idx + 1) % len
           stateRef.value = { ...stateRef.value, selectedIndex: idx }
+          scrollSuggestionIntoView(containerRef, idx)
           return true
         }
         if (event.key === 'Enter' || event.key === 'Tab') {
@@ -504,7 +518,7 @@ const editor = useEditor({
           const showAll = allItem.label.toLowerCase().includes(q) || 'all'.includes(q)
           return showAll ? [allItem, ...agentItems] : agentItems
         },
-        render: createSuggestionRenderer(mentionState),
+        render: createSuggestionRenderer(mentionState, mentionSuggestionListRef),
         command: ({ editor: ed, range, props: p }: any) => {
           const pending = pendingCommand.value
           if (pending) {
@@ -544,7 +558,7 @@ const editor = useEditor({
               needsAgent: c.needsAgent,
             }))
         },
-        render: createSuggestionRenderer(commandState),
+        render: createSuggestionRenderer(commandState, commandSuggestionListRef),
         command: ({ editor: ed, range, props: p }: any) => {
           if (p.immediate) {
             ed.chain().focus().deleteRange(range).run()
@@ -1137,10 +1151,11 @@ function updateSuggestionIndex(state: SuggestionState, idx: number) {
           <div class="px-3 py-1.5 text-[10px] text-muted-foreground font-medium uppercase tracking-wide border-b border-border">
             {{ t('chat.mentionTitle') }}
           </div>
-          <div class="max-h-40 overflow-y-auto">
+          <div ref="mentionSuggestionListRef" class="max-h-40 overflow-y-auto">
             <button
               v-for="(item, idx) in mentionState.items"
               :key="item.id"
+              :data-suggestion-index="idx"
               class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors text-left"
               :class="idx === mentionState.selectedIndex ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]'"
               @mousedown.prevent="selectSuggestionItem(mentionState!, item)"
@@ -1167,10 +1182,11 @@ function updateSuggestionIndex(state: SuggestionState, idx: number) {
           <div class="px-3 py-1.5 text-[10px] text-muted-foreground font-medium uppercase tracking-wide border-b border-border">
             Commands
           </div>
-          <div class="max-h-40 overflow-y-auto">
+          <div ref="commandSuggestionListRef" class="max-h-40 overflow-y-auto">
             <button
               v-for="(item, idx) in commandState.items"
               :key="item.id"
+              :data-suggestion-index="idx"
               class="w-full flex items-center gap-2 px-3 py-2 text-sm transition-colors text-left"
               :class="idx === commandState.selectedIndex ? 'bg-white/[0.07]' : 'hover:bg-white/[0.04]'"
               @mousedown.prevent="selectSuggestionItem(commandState!, item)"

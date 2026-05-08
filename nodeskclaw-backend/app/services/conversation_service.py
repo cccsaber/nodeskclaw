@@ -272,8 +272,7 @@ async def sync_conversations_from_topology(
     # Generate system messages for membership changes
     from app.models.workspace_message import WorkspaceMessage
 
-    broadcast_payloads: list[dict] = []
-    now_iso = datetime.now(timezone.utc).isoformat()
+    pending_broadcast_messages: list[WorkspaceMessage] = []
 
     for conv, joined, left in membership_changes:
         parts: list[str] = []
@@ -298,25 +297,35 @@ async def sync_conversations_from_topology(
         conv.last_message_at = func.now()
         conv.last_message_preview = content[:100]
 
-        broadcast_payloads.append({
-            "id": msg.id,
-            "sender_type": "system",
-            "sender_id": "system",
-            "sender_name": "System",
-            "content": content,
-            "message_type": "system",
-            "conversation_id": conv.id,
-            "created_at": now_iso,
-        })
+        pending_broadcast_messages.append(msg)
 
     await db.flush()
 
-    if broadcast_payloads:
+    if pending_broadcast_messages:
         from app.api.workspaces import broadcast_event
-        for payload in broadcast_payloads:
-            broadcast_event(workspace_id, "system:info", payload)
+        for msg in pending_broadcast_messages:
+            broadcast_event(workspace_id, "system:info", {
+                "id": msg.id,
+                "sender_type": msg.sender_type,
+                "sender_id": msg.sender_id,
+                "sender_name": msg.sender_name,
+                "content": msg.content,
+                "message_type": msg.message_type,
+                "conversation_id": msg.conversation_id,
+                "created_at": (msg.created_at or datetime.now(timezone.utc)).isoformat(),
+            })
 
     return result_conversations
+
+
+async def sync_conversations_and_notify_topology(
+    workspace_id: str, db: AsyncSession,
+) -> list[Conversation]:
+    conversations = await sync_conversations_from_topology(workspace_id, db)
+    from app.services.runtime.pg_notify import PGNotifyService
+
+    await PGNotifyService.notify_topology_changed(db, workspace_id)
+    return conversations
 
 
 async def get_blackboard_conversation(

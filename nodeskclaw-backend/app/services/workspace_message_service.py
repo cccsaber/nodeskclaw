@@ -81,6 +81,7 @@ async def get_recent_messages(
     workspace_id: str,
     limit: int = 50,
     conversation_id: str | None = None,
+    include_unscoped: bool = False,
 ) -> list[WorkspaceMessage]:
     stmt = (
         select(WorkspaceMessage)
@@ -89,7 +90,14 @@ async def get_recent_messages(
             WorkspaceMessage.deleted_at.is_(None),
         )
     )
-    if conversation_id:
+    if conversation_id and include_unscoped:
+        stmt = stmt.where(
+            or_(
+                WorkspaceMessage.conversation_id == conversation_id,
+                WorkspaceMessage.conversation_id.is_(None),
+            )
+        )
+    elif conversation_id:
         stmt = stmt.where(WorkspaceMessage.conversation_id == conversation_id)
     result = await db.execute(
         stmt.order_by(WorkspaceMessage.created_at.desc()).limit(limit)

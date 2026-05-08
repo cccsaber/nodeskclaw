@@ -156,7 +156,7 @@ async def create_corridor_hex(
     await corridor_router.auto_connect_hex(workspace_id, body.hex_q, body.hex_r, user.id if user else None, db)
 
     from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     await db.refresh(ch)
@@ -227,7 +227,9 @@ async def update_corridor_hex(
     if not ch:
         raise _corridor_http_error(404, 40480, "errors.corridor.hex_not_found", "走廊格子不存在")
 
+    display_name_changed = False
     if body.display_name is not None:
+        display_name_changed = ch.display_name != body.display_name
         ch.display_name = body.display_name
 
     position_changed = False
@@ -257,6 +259,11 @@ async def update_corridor_hex(
     if position_changed:
         await _cascade_update_connections(workspace_id, old_q, old_r, ch.hex_q, ch.hex_r, db)
         await corridor_router.auto_connect_hex(workspace_id, ch.hex_q, ch.hex_r, ch.created_by, db)
+        await db.commit()
+
+    if position_changed or display_name_changed:
+        from app.services import conversation_service
+        await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
         await db.commit()
 
     actor_type, actor_id = _actor(org_ctx)
@@ -325,7 +332,7 @@ async def delete_corridor_hex(
         card.soft_delete()
 
     from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     actor_type, actor_id = _actor(org_ctx)
@@ -377,7 +384,7 @@ async def create_connection(
     db.add(conn)
 
     from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     await db.refresh(conn)
@@ -447,7 +454,7 @@ async def delete_connection(
     conn.soft_delete()
 
     from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     actor_type, actor_id = _actor(org_ctx)
@@ -511,6 +518,9 @@ async def create_human_hex(
             "channel_config": body.channel_config,
         },
     )
+
+    from app.services import conversation_service
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     broadcast_event(workspace_id, "human:hex_placed", {"hex_id": hh.id, "user_id": body.user_id, "hex_q": hh.hex_q, "hex_r": hh.hex_r, "display_name": hh.display_name})
@@ -598,6 +608,9 @@ async def update_human_hex(
             workspace_id, hh.hex_q, hh.hex_r, user.id if user else None, db,
         )
         await db.commit()
+    from app.services import conversation_service
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
+    await db.commit()
     actor_type, actor_id = _actor(org_ctx)
     broadcast_event(workspace_id, "human:hex_updated", {"hex_id": hex_id, "hex_q": hh.hex_q, "hex_r": hh.hex_r, "display_name": hh.display_name, "display_color": hh.display_color})
     await hooks.emit(
@@ -641,6 +654,9 @@ async def delete_human_hex(
         hh.soft_delete()
     if card:
         card.soft_delete()
+
+    from app.services import conversation_service
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
 
     await db.commit()
     actor_type, actor_id = _actor(org_ctx)

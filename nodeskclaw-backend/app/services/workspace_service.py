@@ -544,6 +544,10 @@ async def add_agent(db: AsyncSession, workspace_id: str, data: AddAgentRequest, 
                 await db.commit()
                 raise ValueError(f"基因 {slug} 安装失败: {e}") from e
 
+    from app.services import conversation_service
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
+    await db.commit()
+
     try:
         await _deploy_channel_plugin(inst, db, workspace_id)
         has_topo = await corridor_router.has_any_connections(workspace_id, db)
@@ -614,6 +618,9 @@ async def remove_agent(db: AsyncSession, workspace_id: str, instance_id: str) ->
     await node_card_service.soft_delete_node_card(
         db, node_id=instance_id, workspace_id=workspace_id,
     )
+
+    from app.services import conversation_service
+    await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
     await db.commit()
     return True
 
@@ -636,8 +643,11 @@ async def update_agent(
         return None
     wa, inst = row
 
+    old_display_name = wa.display_name
+    display_name_changed = False
     if data.display_name is not None:
         wa.display_name = data.display_name or None
+        display_name_changed = wa.display_name != old_display_name
     if data.label is not None:
         wa.label = data.label or None
     if data.theme_color is not None:
@@ -652,9 +662,13 @@ async def update_agent(
             wa.hex_r = new_r
             position_changed = True
     elif data.hex_q is not None:
-        wa.hex_q = data.hex_q
+        if data.hex_q != old_q:
+            wa.hex_q = data.hex_q
+            position_changed = True
     elif data.hex_r is not None:
-        wa.hex_r = data.hex_r
+        if data.hex_r != old_r:
+            wa.hex_r = data.hex_r
+            position_changed = True
 
     card = await node_card_service.get_node_card(
         db, node_id=inst.id, workspace_id=workspace_id,
@@ -677,6 +691,11 @@ async def update_agent(
         await corridor_router.auto_connect_hex(
             workspace_id, wa.hex_q, wa.hex_r, inst.created_by, db,
         )
+        await db.commit()
+
+    if position_changed or display_name_changed:
+        from app.services import conversation_service
+        await conversation_service.sync_conversations_and_notify_topology(workspace_id, db)
         await db.commit()
 
     await db.refresh(wa)
@@ -811,7 +830,11 @@ async def _broadcast_join_message(workspace_id: str, inst: Instance) -> None:
 
     try:
         async with async_session_factory() as db:
-            await msg_service.record_message(
+            from app.services import conversation_service
+
+            blackboard_conv = await conversation_service.get_blackboard_conversation(workspace_id, db)
+            conversation_id = blackboard_conv.id if blackboard_conv else None
+            msg = await msg_service.record_message(
                 db,
                 workspace_id=workspace_id,
                 sender_type="system",
@@ -819,12 +842,20 @@ async def _broadcast_join_message(workspace_id: str, inst: Instance) -> None:
                 sender_name="System",
                 content=f"{agent_name} 已加入办公室",
                 message_type="system",
+                conversation_id=conversation_id,
             )
 
         broadcast_event(workspace_id, "system:welcome", {
+            "id": msg.id,
             "agent_name": agent_name,
             "instance_id": inst.id,
             "content": f"{agent_name} 已加入办公室",
+            "sender_type": msg.sender_type,
+            "sender_id": msg.sender_id,
+            "sender_name": msg.sender_name,
+            "message_type": msg.message_type,
+            "conversation_id": msg.conversation_id,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
         })
     except Exception as e:
         logger.warning("广播加入消息失败（非致命）: instance=%s error=%s", inst.name, e)
@@ -835,15 +866,17 @@ async def _broadcast_leave_message(workspace_id: str, inst: Instance) -> None:
     from app.api.workspaces import broadcast_event
     from app.core.deps import async_session_factory
     from app.services import workspace_message_service as msg_service
-    from datetime import datetime, timezone
 
     agent_name = inst.agent_display_name or inst.name
-    msg_id = f"sys-leave-{inst.id[:8]}-{int(datetime.now(timezone.utc).timestamp())}"
     content = f"{agent_name} 已退出办公室"
 
     try:
         async with async_session_factory() as db:
-            await msg_service.record_message(
+            from app.services import conversation_service
+
+            blackboard_conv = await conversation_service.get_blackboard_conversation(workspace_id, db)
+            conversation_id = blackboard_conv.id if blackboard_conv else None
+            msg = await msg_service.record_message(
                 db,
                 workspace_id=workspace_id,
                 sender_type="system",
@@ -851,15 +884,18 @@ async def _broadcast_leave_message(workspace_id: str, inst: Instance) -> None:
                 sender_name="System",
                 content=content,
                 message_type="system",
+                conversation_id=conversation_id,
             )
 
         broadcast_event(workspace_id, "system:info", {
-            "id": msg_id,
-            "sender_type": "system",
-            "sender_id": "system",
-            "sender_name": "System",
+            "id": msg.id,
+            "sender_type": msg.sender_type,
+            "sender_id": msg.sender_id,
+            "sender_name": msg.sender_name,
             "content": content,
-            "created_at": datetime.now(timezone.utc).isoformat(),
+            "message_type": msg.message_type,
+            "conversation_id": msg.conversation_id,
+            "created_at": msg.created_at.isoformat() if msg.created_at else None,
         })
     except Exception as e:
         logger.warning("广播退出消息失败（非致命）: instance=%s error=%s", inst.name, e)
@@ -887,6 +923,13 @@ async def _send_welcome_message(workspace_id: str, inst: Instance) -> None:
 
     try:
         from app.services.collaboration_service import _invoke_target_agent
+        from app.core.deps import async_session_factory
+        from app.services import conversation_service
+
+        async with async_session_factory() as db:
+            blackboard_conv = await conversation_service.get_blackboard_conversation(workspace_id, db)
+            conversation_id = blackboard_conv.id if blackboard_conv else None
+
         await _invoke_target_agent(
             workspace_id=workspace_id,
             target_instance=inst,
@@ -894,6 +937,8 @@ async def _send_welcome_message(workspace_id: str, inst: Instance) -> None:
             source_instance_id="system",
             message=WELCOME_MESSAGE,
             depth=0,
+            conversation_id=conversation_id,
+            persist_message_type="chat",
         )
     except Exception as e:
         logger.warning("发送欢迎消息失败（非致命）: instance=%s error=%s", inst.name, e)

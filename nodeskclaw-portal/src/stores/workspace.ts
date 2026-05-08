@@ -2,6 +2,7 @@ import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import api from '@/services/api'
 import { useAuthStore } from '@/stores/auth'
+import { resolveActiveConversationId } from '@/utils/workspaceConversations'
 
 export interface AgentBrief {
   instance_id: string
@@ -510,7 +511,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (installGeneSlugs?.length) body.install_gene_slugs = installGeneSlugs
     const res = await api.post(`/workspaces/${workspaceId}/agents`, body)
     if (currentWorkspace.value?.id === workspaceId) {
-      await fetchWorkspace(workspaceId)
+      await refreshWorkspaceStructure(workspaceId)
     }
     return res.data.data
   }
@@ -522,14 +523,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (err?.response?.status !== 404) throw err
     }
     if (currentWorkspace.value?.id === workspaceId) {
-      await fetchWorkspace(workspaceId)
+      await refreshWorkspaceStructure(workspaceId)
     }
   }
 
   async function updateAgent(workspaceId: string, instanceId: string, data: Record<string, unknown>) {
     await api.put(`/workspaces/${workspaceId}/agents/${instanceId}`, data)
     if (currentWorkspace.value?.id === workspaceId) {
-      await fetchWorkspace(workspaceId)
+      await refreshWorkspaceStructure(workspaceId)
     }
   }
 
@@ -742,12 +743,19 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     try {
       const res = await api.get(`/workspaces/${workspaceId}/conversations`)
       conversations.value = (res.data.data || []) as Conversation[]
-      if (conversations.value.length > 0 && !activeConversationId.value) {
-        activeConversationId.value = conversations.value[0].id
-      }
+      activeConversationId.value = resolveActiveConversationId(conversations.value, activeConversationId.value)
     } catch (e) {
       console.error('fetchConversations error:', e)
     }
+  }
+
+  async function refreshWorkspaceStructure(workspaceId: string) {
+    await Promise.all([
+      fetchWorkspace(workspaceId),
+      fetchTopology(workspaceId),
+      fetchConversations(workspaceId),
+    ])
+    activeConversationId.value = resolveActiveConversationId(conversations.value, activeConversationId.value)
   }
 
   async function fetchConversationMessages(workspaceId: string, conversationId: string, limit = 50): Promise<GroupChatMessage[]> {
@@ -789,6 +797,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
         content: m.content as string,
         message_type: m.message_type as string,
         created_at: m.created_at as string,
+        conversation_id: m.conversation_id as string | undefined,
         attachments: (m.attachments as FileAttachment[]) || undefined,
       }))
     } catch (e) {
@@ -867,6 +876,30 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     }, 45_000))
   }
 
+  function _streamKey(data: Record<string, unknown>) {
+    return {
+      conversationId: data.conversation_id as string | undefined,
+      traceId: data.trace_id as string | undefined,
+    }
+  }
+
+  function _findStreamingMessage(instanceId: string, data: Record<string, unknown>) {
+    const { conversationId, traceId } = _streamKey(data)
+    return chatMessages.value.find((message) => {
+      if (message.sender_id !== instanceId || !message.streaming) return false
+      if (conversationId) return message.conversation_id === conversationId
+      if (traceId) return message.trace_id === traceId
+      return !message.conversation_id && !message.trace_id
+    })
+  }
+
+  function _applyStreamMetadata(message: GroupChatMessage, data: Record<string, unknown>) {
+    if (data.conversation_id) message.conversation_id = data.conversation_id as string
+    if (data.trace_id) message.trace_id = data.trace_id as string
+    if (data.causation_id) message.causation_id = data.causation_id as string
+    if (data.envelope_id) message.envelope_id = data.envelope_id as string
+  }
+
   function _handleAgentChunk(data: Record<string, unknown>) {
     const instanceId = data.instance_id as string
     const agentName = data.agent_name as string
@@ -875,11 +908,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     typingAgents.value.delete(instanceId)
     _clearTypingTimer(instanceId)
 
-    const existing = chatMessages.value.find(
-      (m) => m.sender_id === instanceId && m.streaming,
-    )
+    const existing = _findStreamingMessage(instanceId, data)
     if (existing) {
       existing.content += content
+      _applyStreamMetadata(existing, data)
     } else {
       chatMessages.value.push({
         id: (data.envelope_id as string) || `stream-${instanceId}-${Date.now()}`,
@@ -909,12 +941,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     typingAgents.value.delete(instanceId)
     _clearTypingTimer(instanceId)
 
-    const streaming = chatMessages.value.find(
-      (m) => m.sender_id === instanceId && m.streaming,
-    )
+    const streaming = _findStreamingMessage(instanceId, data)
     if (streaming) {
       streaming.streaming = false
       streaming.content = (data.full_content as string) || streaming.content
+      _applyStreamMetadata(streaming, data)
     }
   }
 
@@ -933,12 +964,11 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       raw: errorRaw,
     }
 
-    const streaming = chatMessages.value.find(
-      (m) => m.sender_id === instanceId && m.streaming,
-    )
+    const streaming = _findStreamingMessage(instanceId, data)
     if (streaming) {
       streaming.streaming = false
       streaming.error = errorObj
+      _applyStreamMetadata(streaming, data)
     } else {
       chatMessages.value.push({
         id: `error-${instanceId}-${Date.now()}`,
@@ -967,9 +997,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
 
     if (_isDuplicateMessage(msgId)) return
 
-    const existingStreaming = chatMessages.value.find(
-      (m) => m.sender_id === instanceId && m.streaming,
-    )
+    const existingStreaming = _findStreamingMessage(instanceId, data)
     if (existingStreaming) {
       existingStreaming.streaming = false
       existingStreaming.message_type = 'collaboration'
@@ -978,6 +1006,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       existingStreaming.intent = intent
       existingStreaming.priority = priority
       existingStreaming.envelope_id = data.envelope_id as string | undefined
+      _applyStreamMetadata(existingStreaming, data)
       return
     }
 
@@ -1002,15 +1031,19 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   function _handleSystemWelcome(data: Record<string, unknown>) {
     const agentName = data.agent_name as string
     const content = data.content as string
+    const msgId = (data.id as string) || `sys-${Date.now()}`
+
+    if (chatMessages.value.some((message) => message.id === msgId)) return
 
     chatMessages.value.push({
-      id: `sys-${Date.now()}`,
+      id: msgId,
       sender_type: 'system',
-      sender_id: 'system',
-      sender_name: 'System',
+      sender_id: (data.sender_id as string) || 'system',
+      sender_name: (data.sender_name as string) || 'System',
       content: content || `${agentName} 已加入办公室`,
-      message_type: 'system',
-      created_at: new Date().toISOString(),
+      message_type: (data.message_type as string) || 'system',
+      created_at: (data.created_at as string) || new Date().toISOString(),
+      conversation_id: data.conversation_id as string | undefined,
     })
     _incrementUnread()
   }
@@ -1021,6 +1054,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   let externalCallback: ChatSSECallback | null = null
   let _reconnectAttempts = 0
   let _reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  let _structureRefreshTimer: ReturnType<typeof setTimeout> | null = null
   let _lastEventId = ''
   let _connectGeneration = 0
   const _recentMessageIds = new Set<string>()
@@ -1042,6 +1076,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const max = 30000
     const delay = Math.min(base * Math.pow(2, _reconnectAttempts), max)
     return delay + Math.random() * 500
+  }
+
+  function scheduleWorkspaceStructureRefresh(workspaceId: string) {
+    if (_structureRefreshTimer) clearTimeout(_structureRefreshTimer)
+    _structureRefreshTimer = setTimeout(() => {
+      _structureRefreshTimer = null
+      void refreshWorkspaceStructure(workspaceId)
+    }, 150)
   }
 
   async function connectSSE(workspaceId: string, onEvent?: ChatSSECallback) {
@@ -1211,6 +1253,9 @@ export const useWorkspaceStore = defineStore('workspace', () => {
             })
           }
         }
+        if (data.conversation_id) {
+          scheduleWorkspaceStructureRefresh(workspaceId)
+        }
       } catch { /* ignore */ }
     })
 
@@ -1242,7 +1287,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     const topologyEvents = [
       'corridor:hex_placed', 'corridor:hex_updated', 'corridor:hex_removed',
       'connection:created', 'connection:removed',
-      'human:hex_placed', 'human:hex_removed', 'human:channel_updated',
+      'human:hex_placed', 'human:hex_updated', 'human:hex_removed', 'human:channel_updated',
     ]
     for (const eventName of topologyEvents) {
       eventSource.addEventListener(eventName, (e: MessageEvent) => {
@@ -1250,9 +1295,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
           const data = JSON.parse(e.data)
           externalCallback?.(eventName, data)
         } catch { /* ignore */ }
-        fetchTopology(workspaceId)
+        scheduleWorkspaceStructureRefresh(workspaceId)
       })
     }
+
+    eventSource.addEventListener('topology:changed', (e: MessageEvent) => {
+      try {
+        const data = JSON.parse(e.data)
+        externalCallback?.('topology:changed', data)
+      } catch { /* ignore */ }
+      scheduleWorkspaceStructureRefresh(workspaceId)
+    })
 
     const humanNotifyEvents = [
       'human:message_delivered', 'human:message_received',
@@ -1292,6 +1345,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (_reconnectTimer) {
       clearTimeout(_reconnectTimer)
       _reconnectTimer = null
+    }
+    if (_structureRefreshTimer) {
+      clearTimeout(_structureRefreshTimer)
+      _structureRefreshTimer = null
     }
     eventSource?.close()
     eventSource = null
@@ -1389,7 +1446,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     })
     const ch = res.data.data
     corridorHexes.value.push(ch)
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
     return ch as CorridorHexInfo
   }
 
@@ -1397,14 +1454,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     await api.put(`/workspaces/${workspaceId}/corridor-hexes/${hexId}`, { hex_q: hexQ, hex_r: hexR })
     const idx = corridorHexes.value.findIndex(c => c.id === hexId)
     if (idx >= 0) { corridorHexes.value[idx].hex_q = hexQ; corridorHexes.value[idx].hex_r = hexR }
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function renameCorridorHex(workspaceId: string, hexId: string, displayName: string) {
     await api.put(`/workspaces/${workspaceId}/corridor-hexes/${hexId}`, { display_name: displayName })
     const idx = corridorHexes.value.findIndex(c => c.id === hexId)
     if (idx >= 0) corridorHexes.value[idx].display_name = displayName
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function deleteCorridorHex(workspaceId: string, hexId: string) {
@@ -1414,7 +1471,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
       if (err?.response?.status !== 404) throw err
     }
     corridorHexes.value = corridorHexes.value.filter(c => c.id !== hexId)
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function fetchConnections(workspaceId: string) {
@@ -1432,14 +1489,14 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     })
     const conn = res.data.data
     connections.value.push(conn)
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
     return conn as ConnectionInfo
   }
 
   async function deleteConnection(workspaceId: string, connId: string) {
     await api.delete(`/workspaces/${workspaceId}/connections/${connId}`)
     connections.value = connections.value.filter(c => c.id !== connId)
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   const humanHexes = ref<HumanHexInfo[]>([])
@@ -1469,17 +1526,17 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     if (displayColor) payload.display_color = displayColor
     if (displayName) payload.display_name = displayName
     await api.post(`/workspaces/${workspaceId}/human-hexes`, payload)
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function moveHumanHex(workspaceId: string, hexId: string, hexQ: number, hexR: number) {
     await api.put(`/workspaces/${workspaceId}/human-hexes/${hexId}`, { hex_q: hexQ, hex_r: hexR })
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function updateHumanHexColor(workspaceId: string, hexId: string, color: string) {
     await api.put(`/workspaces/${workspaceId}/human-hexes/${hexId}`, { display_color: color })
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function deleteHumanHex(workspaceId: string, hexId: string) {
@@ -1488,19 +1545,19 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     } catch (err: any) {
       if (err?.response?.status !== 404) throw err
     }
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function renameHumanHex(workspaceId: string, hexId: string, displayName: string) {
     await api.put(`/workspaces/${workspaceId}/human-hexes/${hexId}`, { display_name: displayName })
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function updateHumanHexChannel(workspaceId: string, hexId: string, channelType: string, channelConfig: Record<string, unknown>) {
     await api.put(`/workspaces/${workspaceId}/human-hexes/${hexId}`, {
       channel_type: channelType, channel_config: channelConfig,
     })
-    await fetchTopology(workspaceId)
+    await refreshWorkspaceStructure(workspaceId)
   }
 
   async function fetchMyPermissions(workspaceId: string) {
@@ -1551,6 +1608,10 @@ export const useWorkspaceStore = defineStore('workspace', () => {
   }
 
   function resetCurrentState() {
+    if (_structureRefreshTimer) {
+      clearTimeout(_structureRefreshTimer)
+      _structureRefreshTimer = null
+    }
     currentWorkspace.value = null
     blackboard.value = null
     schedules.value = []
@@ -1649,6 +1710,7 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     conversations,
     activeConversationId,
     fetchConversations,
+    refreshWorkspaceStructure,
     fetchConversationMessages,
     fetchChatHistory,
     sendWorkspaceMessage,

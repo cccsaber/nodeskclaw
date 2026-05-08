@@ -183,9 +183,6 @@ async def add_agent(
         agent = await workspace_service.add_agent(db, workspace_id, data, user.id)
     except ValueError as e:
         raise _error(400, 40031, "errors.workspace.add_agent_invalid", str(e))
-    from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
-    await db.commit()
     await hooks.emit("operation_audit", action="workspace.agent_added", target_type="workspace", target_id=workspace_id, actor_id=user.id, details={"instance_id": data.instance_id})
     return _ok(agent.model_dump(mode="json"))
 
@@ -280,9 +277,6 @@ async def remove_agent(
     ok = await workspace_service.remove_agent(db, workspace_id, instance_id)
     if not ok:
         raise _error(404, 40432, "errors.workspace.agent_not_in_workspace", "AI 员工不在该办公室中")
-    from app.services import conversation_service
-    await conversation_service.sync_conversations_from_topology(workspace_id, db)
-    await db.commit()
     await hooks.emit("operation_audit", action="workspace.agent_removed", target_type="workspace", target_id=workspace_id, actor_id=user.id, details={"instance_id": instance_id})
     return _ok(message="已移除")
 
