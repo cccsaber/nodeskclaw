@@ -36,6 +36,8 @@ const enUS = {
     yes: "Yes",
     no: "No",
     copyFailed: "Copy failed, please select and copy manually",
+    localeZhCN: "Simplified Chinese",
+    localeEnUS: "English",
   },
   status: {
     running: "Running",
@@ -178,6 +180,13 @@ const enUS = {
         efficiencyLabel: 'Productivity',
       },
     },
+  },
+  home: {
+    title: "My AI Employees",
+    subtitle: "Manage the DeskClaw AI employees you have deployed",
+    createInstance: "Create AI Employee",
+    emptyTitle: "No AI employees yet",
+    emptyDescription: "Create your first DeskClaw AI employee, then arrange its collaboration role inside a cyber office.",
   },
   orgSetup: {
     title: "Set up your organization",

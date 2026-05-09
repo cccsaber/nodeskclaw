@@ -36,6 +36,8 @@ const zhCN = {
     yes: "是",
     no: "否",
     copyFailed: "复制失败，请手动选中复制",
+    localeZhCN: "简体中文",
+    localeEnUS: "English",
   },
   status: {
     running: "运行中",
@@ -178,6 +180,13 @@ const zhCN = {
         efficiencyLabel: '人效提升',
       },
     },
+  },
+  home: {
+    title: "我的 AI 员工",
+    subtitle: "管理你部署的 DeskClaw AI 员工",
+    createInstance: "创建 AI 员工",
+    emptyTitle: "还没有 AI 员工",
+    emptyDescription: "创建第一个 DeskClaw AI 员工后，就可以在赛博办公室中编排协作关系。",
   },
   orgSetup: {
     title: "开通企业空间",
